@@ -29,8 +29,9 @@
     <remap from="/velodyne_cloud_registered_local" to="/cloud_registered_body"/>
     <remap from="/cloud_for_scancontext" to="/cloud_registered_lidar"/>   <!-- because ScanContext requires lidar-ego-centric coordinate for the better performance -->
 
+    <param name="gpsTopic" type="string" value="/localization/gps/fix"/>
+    <param name="imuTopic" type="string" value="/localization/imu/data"/>
     <!-- utils -->
-    <!-- <param name="save_directory" type="string" value="$(env HOME)/Desktop/catkin_fastlio_slam/data/"/>  CHANGE THIS and end with / -->
     <param name="save_directory" type="string" value="/home/jiangxx/jxx_ws1/lio_outputMaps/my_test/"/>  <!-- CHANGE THIS and end with / -->
     <!-- nodes -->
     <node pkg="aloam_velodyne" type="alaserPGO_gps" name="alaserPGO_gps" output="screen" /> <!-- Scan Context-based PGO -->

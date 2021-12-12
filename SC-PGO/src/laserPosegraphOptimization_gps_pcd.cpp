@@ -74,6 +74,8 @@ double keyframeMeterGap;
 double keyframeDegGap, keyframeRadGap;
 double translationAccumulated = 1000000.0; // large value means must add the first given frame.
 double rotaionAccumulated = 1000000.0; // large value means must add the first given frame.
+string gpsTopic;
+string imuTopic;
 
 bool isNowKeyFrame = false; 
 
@@ -942,6 +944,10 @@ int main(int argc, char **argv)
 
 	nh.param<double>("sc_dist_thres", scDistThres, 0.2);  
 	nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
+    nh.param<string>("gpsTopic", gpsTopic, "/localization/gps/fix");
+    nh.param<string>("imuTopic", imuTopic, "/localization/imu/data");
+
+
 
     ros::ServiceServer save_map_service_server;
 
@@ -967,10 +973,8 @@ int main(int argc, char **argv)
 
 	ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
 	ros::Subscriber subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/aft_mapped_to_init", 100, laserOdometryHandler);
-	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("/localization/gps/fix", 100, gpsHandler);
-    // ros::Subscriber subImu = nh.subscribe<sensor_msgs::NavSatFix>("/gps/fix", 100, gpsHandler);
-
-    ros::Subscriber sub_imu = nh.subscribe("/localization/imu/data", 200000, imu_cbk);
+	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>(gpsTopic, 100, gpsHandler);
+    ros::Subscriber sub_imu = nh.subscribe(imuTopic, 200000, imu_cbk);
 
 	pubOdomAftPGO = nh.advertise<nav_msgs::Odometry>("/aft_pgo_odom", 100);
 	pubOdomRepubVerifier = nh.advertise<nav_msgs::Odometry>("/repub_odom", 100);

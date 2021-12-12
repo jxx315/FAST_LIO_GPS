@@ -15,10 +15,48 @@ this is a  modified version of  [FAST-LIO2](https://github.com/hku-mars/FAST_LIO
 
 ## Features
 -  directly mapping in UTM Coordinate system
+-  need gps-->lidar extrinsic_T and extrinsic_R
 
-## How to use?
--  
-    to be continue...
+## Prerequisites
+
+- Ubuntu and ROS
+Ubuntu >= 18.04
+ROS >= Melodic. ROS Installation
+
+- build
+
+```
+    cd ~/$A_ROS_DIR$/src
+    git clone https://github.com/jxx315/FAST_LIO_GPS.git
+    cd ..
+    catkin_make
+    source devel/setup.bash
+```
+
+
+- how to use
+
+```
+    source devel/setup.bash
+    roslaunch fast_lio mapping_rs32.launch
+```
+
+```
+    source devel/setup.bash
+    roslaunch aloam_velodyne fastlio_rs32_gps.launch
+```
+
+- save pcd 
+
+```
+rosservice call /opt/save_map "utm: false
+resolution: 0.0
+destination: ''" 
+
+
+```
+
+
 
 
 

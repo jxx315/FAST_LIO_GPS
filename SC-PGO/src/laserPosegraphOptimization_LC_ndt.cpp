@@ -24,6 +24,9 @@
 #include <pcl/filters/crop_box.h> 
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <pcl/registration/ndt.h>      //NDT(正态分布)配准类头文件
+#include <pcl/filters/approximate_voxel_grid.h>   //滤波类头文件  （使用体素网格过滤器处理的效果比较好）
+
 #include <ros/ros.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/PointCloud2.h>
@@ -32,7 +35,6 @@
 #include <tf/transform_broadcaster.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
-
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/PoseStamped.h>
@@ -40,10 +42,6 @@
 #include <eigen3/Eigen/Dense>
 
 #include <ceres/ceres.h>
-
-#include <geodesy/utm.h>
-#include <geodesy/wgs84.h>
-#include <geographic_msgs/GeoPointStamped.h>
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/Values.h>
@@ -69,6 +67,14 @@ using namespace gtsam;
 using std::cout;
 using std::endl;
 
+
+using namespace std;
+typedef pcl::PointCloud<PointType> pointcloud;
+typedef pcl::PointCloud<pcl::Normal> pointnormal;
+typedef pcl::PointCloud<pcl::FPFHSignature33> fpfhFeature;
+
+
+
 double keyframeMeterGap;
 double keyframeDegGap, keyframeRadGap;
 double translationAccumulated = 1000000.0; // large value means must add the first given frame.
@@ -83,11 +89,6 @@ std::queue<nav_msgs::Odometry::ConstPtr> odometryBuf;
 std::queue<sensor_msgs::PointCloud2ConstPtr> fullResBuf;
 std::queue<sensor_msgs::NavSatFix::ConstPtr> gpsBuf;
 std::queue<std::pair<int, int> > scLoopICPBuf;
-
-sensor_msgs::Imu  curr_IMU;
-bool get_imu = false;
-bool firstLoop = true;
-Eigen::Quaterniond Q_first;
 
 std::mutex mBuf;
 std::mutex mKF;
@@ -125,7 +126,6 @@ std::mutex mtxPosegraph;
 std::mutex mtxRecentPose;
 
 pcl::PointCloud<PointType>::Ptr laserCloudMapPGO(new pcl::PointCloud<PointType>());
-pcl::PointCloud<PointType>::Ptr laserCloudMapPGO_SavePcd(new pcl::PointCloud<PointType>());
 pcl::VoxelGrid<PointType> downSizeFilterMapPGO;
 bool laserCloudMapPGORedraw = true;
 
@@ -135,16 +135,11 @@ sensor_msgs::NavSatFix::ConstPtr currGPS;
 bool hasGPSforThisKF = false;
 bool gpsOffsetInitialized = false; 
 double gpsAltitudeInitOffset = 0.0;
-double gpsLatitudeInitOffset = 0.0;
-double gpsLongitudeInitOffset = 0.0;
-boost::optional<Eigen::Vector3d> zero_utm;
-Eigen::Vector3d gps_xyz;
 double recentOptimizedX = 0.0;
 double recentOptimizedY = 0.0;
 
-ros::Publisher pubMapAftPGO, pubOdomAftPGO, pubPathAftPGO ,pubOdomGps;
-nav_msgs::Odometry odomGps;
-ros::Publisher pubLoopScanLocal, pubLoopSubmapLocal;
+ros::Publisher pubMapAftPGO, pubOdomAftPGO, pubPathAftPGO;
+ros::Publisher pubLoopScanLocal, pubLoopSubmapLocal,pubLoopScanLocal_aftSac;
 ros::Publisher pubOdomRepubVerifier;
 
 std::string save_directory;
@@ -153,26 +148,6 @@ std::string odomKITTIformat;
 std::fstream pgTimeSaveStream;
 
 
- //*********************************************************************
-Eigen::Vector3d iSamInputGPS(double latitude, double longitude, double altitude)
-{
-        geographic_msgs::GeoPointStampedPtr gps_msg(new geographic_msgs::GeoPointStamped());
-        gps_msg->position.latitude = latitude;
-        gps_msg->position.longitude = longitude;
-        gps_msg->position.altitude = altitude;
-        geodesy::UTMPoint utm;
-        geodesy::fromMsg(gps_msg->position, utm);
-        Eigen::Vector3d xyz(utm.easting, utm.northing, utm.altitude);
-
-        if (!zero_utm)
-        {
-            zero_utm = xyz;
-        }
-        xyz -= (*zero_utm);
-
-        // std::cout << "xyz=" << xyz.x() << "," << xyz.y() << "," << xyz.z() << std::endl;
-        return xyz;
-}
 
 std::string padZeros(int val, int num_digits = 6) {
   std::ostringstream out;
@@ -251,13 +226,6 @@ void gpsHandler(const sensor_msgs::NavSatFix::ConstPtr &_gps)
     }
 } // gpsHandler
 
-void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
-{
-    curr_IMU = *msg_in; 
-
-    //curr_IMU = transformRotZ(curr_IMU,10.5); //由于imu安装角偏了3.5°
-    get_imu = true;
-}
 void initNoises( void )
 {
     gtsam::Vector priorNoiseVector6(6);
@@ -276,11 +244,8 @@ void initNoises( void )
                     gtsam::noiseModel::mEstimator::Cauchy::Create(1), // optional: replacing Cauchy by DCS or GemanMcClure is okay but Cauchy is empirically good.
                     gtsam::noiseModel::Diagonal::Variances(robustNoiseVector6) );
 
-    // double bigNoiseTolerentToXY = 1000000000.0; // 1e9
-    // double gpsAltitudeNoiseScore = 250.0; // if height is misaligned after loop clsosing, use this value bigger
-
-    double bigNoiseTolerentToXY = 5.0; // 1e9
-    double gpsAltitudeNoiseScore = 5.0; // if height is misaligned after loop clsosing, use this value bigger
+    double bigNoiseTolerentToXY = 1000000000.0; // 1e9
+    double gpsAltitudeNoiseScore = 250.0; // if height is misaligned after loop clsosing, use this value bigger
     gtsam::Vector robustNoiseVector3(3); // gps factor has 3 elements (xyz)
     robustNoiseVector3 << bigNoiseTolerentToXY, bigNoiseTolerentToXY, gpsAltitudeNoiseScore; // means only caring altitude here. (because LOAM-like-methods tends to be asymptotically flyging)
     robustGPSNoise = gtsam::noiseModel::Robust::Create(
@@ -390,7 +355,7 @@ void updatePoses(void)
     mKF.lock(); 
     for (int node_idx=0; node_idx < int(isamCurrentEstimate.size()); node_idx++)
     {
-        Pose6D& p = keyframePosesUpdated[node_idx];
+        Pose6D& p =keyframePosesUpdated[node_idx];
         p.x = isamCurrentEstimate.at<gtsam::Pose3>(node_idx).translation().x();
         p.y = isamCurrentEstimate.at<gtsam::Pose3>(node_idx).translation().y();
         p.z = isamCurrentEstimate.at<gtsam::Pose3>(node_idx).translation().z();
@@ -474,14 +439,41 @@ void loopFindNearKeyframesCloud( pcl::PointCloud<PointType>::Ptr& nearKeyframes,
 } // loopFindNearKeyframesCloud
 
 
+
+void loopFindNearKeyframesCloud_jxx( pcl::PointCloud<PointType>::Ptr& nearKeyframes, const int& key, const int& submap_size, const int& root_idx)
+{
+    // extract and stacking near keyframes (in global coord)
+    nearKeyframes->clear();
+    for (int i = -submap_size; i <= submap_size; ++i) {
+        int keyNear = key + i;
+        if (keyNear < 0 || keyNear >= int(keyframeLaserClouds.size()) )
+            continue;
+
+        mKF.lock(); 
+        *nearKeyframes += * local2global(keyframeLaserClouds[keyNear], keyframePosesUpdated[root_idx+i]);
+        mKF.unlock(); 
+    }
+
+    if (nearKeyframes->empty())
+        return;
+
+    // downsample near keyframes
+    pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
+    downSizeFilterICP.setInputCloud(nearKeyframes);
+    downSizeFilterICP.filter(*cloud_temp);
+    *nearKeyframes = *cloud_temp;
+} // loopFindNearKeyframesCloud
+
+
 std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf_idx )
 {
     // parse pointclouds
-    int historyKeyframeSearchNum = 25; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
+    int historyKeyframeSearchNum = 100; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
     pcl::PointCloud<PointType>::Ptr targetKeyframeCloud(new pcl::PointCloud<PointType>());
-    loopFindNearKeyframesCloud(cureKeyframeCloud, _curr_kf_idx, 0, _loop_kf_idx); // use same root of loop kf idx 
-    loopFindNearKeyframesCloud(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum, _loop_kf_idx); 
+    // loopFindNearKeyframesCloud_jxx(cureKeyframeCloud, _curr_kf_idx,5, _loop_kf_idx); // use same root of loop kf idx 
+    loopFindNearKeyframesCloud_jxx(cureKeyframeCloud, _curr_kf_idx,50, _curr_kf_idx);
+    loopFindNearKeyframesCloud_jxx(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum, _loop_kf_idx); 
 
     // loop verification 
     sensor_msgs::PointCloud2 cureKeyframeCloudMsg;
@@ -494,8 +486,63 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     targetKeyframeCloudMsg.header.frame_id = "camera_init";
     pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
 
+
+    std::string curr_node_idx_str = padZeros(_curr_kf_idx);
+    pcl::io::savePCDFileBinary("/home/jiangxx/workspace/" + curr_node_idx_str + ".pcd", *cureKeyframeCloud); // scan 
+    curr_node_idx_str = padZeros(_loop_kf_idx);
+    pcl::io::savePCDFileBinary("/home/jiangxx/workspace/" + curr_node_idx_str + ".pcd", *targetKeyframeCloud); // scan 
+
+    Eigen::Matrix4f guess_trans;
+    {
+        // 初始化正态分布(NDT)对象
+        pcl::NormalDistributionsTransform<PointType, PointType> ndt;
+
+        // 根据输入数据的尺度设置NDT相关参数
+
+        ndt.setTransformationEpsilon (0.01);   //为终止条件设置最小转换差异
+        
+        ndt.setStepSize (0.1);    //为more-thuente线搜索设置最大步长
+
+        ndt.setResolution (1.0);   //设置NDT网格网格结构的分辨率（voxelgridcovariance）
+        //以上参数在使用房间尺寸比例下运算比较好，但是如果需要处理例如一个咖啡杯子的扫描之类更小的物体，需要对参数进行很大程度的缩小
+
+        //设置匹配迭代的最大次数，这个参数控制程序运行的最大迭代次数，一般来说这个限制值之前优化程序会在epsilon变换阀值下终止
+        //添加最大迭代次数限制能够增加程序的鲁棒性阻止了它在错误的方向上运行时间过长
+        ndt.setMaximumIterations (35);
+
+        ndt.setInputSource (cureKeyframeCloud);  //源点云
+        // Setting point cloud to be aligned to.
+        ndt.setInputTarget (targetKeyframeCloud);  //目标点云
+
+        // 设置使用机器人测距法得到的粗略初始变换矩阵结果
+       
+        Eigen::Matrix4f init_guess ;
+        init_guess << 1.0, 0.0, 1.0, 0.0,
+                      0.0, 1.0, 0.0, 0.0,
+                      0.0, 0.0, 1.0, 0.0,
+                      0.0, 0.0, 0.0, 1.0;
+
+        // 计算需要的刚体变换以便将输入的源点云匹配到目标点云
+        pcl::PointCloud<PointType>::Ptr output_cloud (new pcl::PointCloud<PointType>);
+        ndt.align (*output_cloud, init_guess);
+        //这个地方的output_cloud不能作为最终的源点云变换，因为上面对点云进行了滤波处理
+        std::cout << "Normal Distributions Transform has converged:" << ndt.hasConverged ()
+                    << " score: " << ndt.getFitnessScore () << std::endl;
+
+        guess_trans = ndt.getFinalTransformation ();
+
+    }
+     
+
+
     // ICP Settings
     pcl::IterativeClosestPoint<PointType, PointType> icp;
+    // icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
+    // icp.setMaximumIterations(100);
+    // icp.setTransformationEpsilon(1e-6);
+    // icp.setEuclideanFitnessEpsilon(1e-6);
+    // icp.setRANSACIterations(0);
+
     icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
     icp.setMaximumIterations(100);
     icp.setTransformationEpsilon(1e-6);
@@ -506,9 +553,9 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     icp.setInputSource(cureKeyframeCloud);
     icp.setInputTarget(targetKeyframeCloud);
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-    icp.align(*unused_result);
+    icp.align(*unused_result, guess_trans);
  
-    float loopFitnessScoreThreshold = 0.3; // user parameter but fixed low value is safe. 
+    float loopFitnessScoreThreshold =3; // user parameter but fixed low value is safe. 
     if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold) {
         std::cout << "[SC loop] ICP fitness test failed (" << icp.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
         return std::nullopt;
@@ -531,7 +578,7 @@ void process_pg()
 {
     while(1)
     {
-		while ( !odometryBuf.empty() && !fullResBuf.empty() && get_imu)
+		while ( !odometryBuf.empty() && !fullResBuf.empty() )
         {
             //
             // pop and check keyframe is or not  
@@ -555,17 +602,7 @@ void process_pg()
             pcl::fromROSMsg(*fullResBuf.front(), *thisKeyFrame);
             fullResBuf.pop();
 
-            Pose6D pose_curr_ = getOdom(odometryBuf.front());
-            if(firstLoop)
-            {  
-                printf("firstLoop\n");
-                Q_first.w() = curr_IMU.orientation.w;
-                Q_first.x() = curr_IMU.orientation.x;
-                Q_first.y() = curr_IMU.orientation.y;
-                Q_first.z() = curr_IMU.orientation.z;
-                firstLoop = false;
-            }
-            Pose6D pose_curr = transform(pose_curr_,Q_first);
+            Pose6D pose_curr = getOdom(odometryBuf.front());
             odometryBuf.pop();
 
             // find nearest gps 
@@ -609,12 +646,7 @@ void process_pg()
             if( !gpsOffsetInitialized ) {
                 if(hasGPSforThisKF) { // if the very first frame 
                     gpsAltitudeInitOffset = currGPS->altitude;
-                    gpsLatitudeInitOffset = currGPS->latitude;
-                    gpsLongitudeInitOffset = currGPS->longitude;
-     
                     gpsOffsetInitialized = true;
-                    
-                    
                 } 
             }
 
@@ -636,12 +668,11 @@ void process_pg()
             laserCloudMapPGORedraw = true;
             mKF.unlock(); 
 
+            //cout<<"count="<<keyframePoses.size()<<endl;
             const int prev_node_idx = keyframePoses.size() - 2; 
             const int curr_node_idx = keyframePoses.size() - 1; // becuase cpp starts with 0 (actually this index could be any number, but for simple implementation, we follow sequential indexing)
             if( ! gtSAMgraphMade /* prior node */) {
                 const int init_node_idx = 0; 
-
-
                 gtsam::Pose3 poseOrigin = Pose6DtoGTSAMPose3(keyframePoses.at(init_node_idx));
                 // auto poseOrigin = gtsam::Pose3(gtsam::Rot3::RzRyRx(0.0, 0.0, 0.0), gtsam::Point3(0.0, 0.0, 0.0));
 
@@ -668,37 +699,12 @@ void process_pg()
 
                     // gps factor 
                     if(hasGPSforThisKF) {
-                        // double curr_altitude_offseted = currGPS->altitude - gpsAltitudeInitOffset;
-                        gps_xyz = iSamInputGPS(currGPS->latitude,currGPS->longitude,currGPS->altitude);
-                        odomGps.header.frame_id = "camera_init";
-                        odomGps.header.stamp = currGPS->header.stamp;
-                        odomGps.pose.pose.orientation.x = curr_IMU.orientation.x;
-                        odomGps.pose.pose.orientation.y = curr_IMU.orientation.y;
-                        odomGps.pose.pose.orientation.z = curr_IMU.orientation.z;
-                        odomGps.pose.pose.orientation.w = curr_IMU.orientation.w;
-                        odomGps.pose.pose.position.x = gps_xyz[0];
-                        odomGps.pose.pose.position.y = gps_xyz[1];
-                        odomGps.pose.pose.position.z = gps_xyz[2];
-                        
-                        pubOdomGps.publish(odomGps);
-
+                        double curr_altitude_offseted = currGPS->altitude - gpsAltitudeInitOffset;
                         mtxRecentPose.lock();
-                        // gtsam::Point3 gpsConstraint(recentOptimizedX, recentOptimizedY, curr_altitude_offseted); // in this example, only adjusting altitude (for x and y, very big noises are set) 
-                        gtsam::Point3 gpsConstraint(gps_xyz[0], gps_xyz[1], gps_xyz[2]);
-
-                        gtsam::Vector robustNoiseVector3(3); // gps factor has 3 elements (xyz)
-                        robustNoiseVector3 << currGPS->position_covariance[0], currGPS->position_covariance[4], currGPS->position_covariance[8]; // means only caring altitude here. (because LOAM-like-methods tends to be asymptotically flyging)
-                        robustGPSNoise = gtsam::noiseModel::Robust::Create(
-                        gtsam::noiseModel::mEstimator::Cauchy::Create(1), // optional: replacing Cauchy by DCS or GemanMcClure is okay but Cauchy is empirically good.
-                        gtsam::noiseModel::Diagonal::Variances(robustNoiseVector3) );
-                     
+                        gtsam::Point3 gpsConstraint(recentOptimizedX, recentOptimizedY, curr_altitude_offseted); // in this example, only adjusting altitude (for x and y, very big noises are set) 
                         mtxRecentPose.unlock();
-                        if(currGPS->position_covariance[0]<= 0.05 && currGPS->position_covariance[4]<= 0.05)
-                        {
-                            gtSAMgraph.add(gtsam::GPSFactor(curr_node_idx, gpsConstraint, robustGPSNoise));
-                            cout << "========================>GPS factor added at node " << curr_node_idx << endl;
-                        }
-                           
+                        gtSAMgraph.add(gtsam::GPSFactor(curr_node_idx, gpsConstraint, robustGPSNoise));
+                        cout << "GPS factor added at node " << curr_node_idx << endl;
                     }
                     initialEstimate.insert(curr_node_idx, poseTo);                
                     // runISAM2opt();
@@ -733,7 +739,8 @@ void performSCLoopClosure(void)
 
     auto detectResult = scManager.detectLoopClosureID(); // first: nn index, second: yaw diff 
     int SCclosestHistoryFrameID = detectResult.first;
-    if( SCclosestHistoryFrameID != -1 ) { 
+    //if( SCclosestHistoryFrameID != -1 ) { 
+    if( SCclosestHistoryFrameID < 200 && SCclosestHistoryFrameID != -1) { 
         const int prev_node_idx = SCclosestHistoryFrameID;
         const int curr_node_idx = keyframePoses.size() - 1; // because cpp starts 0 and ends n-1
         cout << "Loop detected! - between " << prev_node_idx << " and " << curr_node_idx << "" << endl;
@@ -761,32 +768,56 @@ void process_icp(void)
 {
     while(1)
     {
-		while ( !scLoopICPBuf.empty() )
+		// while ( !scLoopICPBuf.empty() )
+        // {
+        //     if( scLoopICPBuf.size() > 30 ) {
+        //         ROS_WARN("Too many loop clousre candidates to be ICPed is waiting ... Do process_lcd less frequently (adjust loopClosureFrequency)");
+        //     }
+
+        //     mBuf.lock(); 
+        //     std::pair<int, int> loop_idx_pair = scLoopICPBuf.front();
+        //     scLoopICPBuf.pop();
+        //     mBuf.unlock(); 
+
+        //     const int prev_node_idx = loop_idx_pair.first;
+        //     const int curr_node_idx = loop_idx_pair.second;
+
+        //     auto relative_pose_optional = doICPVirtualRelative(prev_node_idx, curr_node_idx);
+        //     if(relative_pose_optional) {
+        //         gtsam::Pose3 relative_pose = relative_pose_optional.value();
+        //         mtxPosegraph.lock();
+        //         gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, relative_pose, robustLoopNoise));
+        //         // runISAM2opt();
+        //         mtxPosegraph.unlock();
+        //     } 
+        // }
+
+
+
+
+        while ( 1 )
         {
-            if( scLoopICPBuf.size() > 30 ) {
-                ROS_WARN("Too many loop clousre candidates to be ICPed is waiting ... Do process_lcd less frequently (adjust loopClosureFrequency)");
-            }
-
-            mBuf.lock(); 
-            std::pair<int, int> loop_idx_pair = scLoopICPBuf.front();
-            scLoopICPBuf.pop();
-            mBuf.unlock(); 
-
-            const int prev_node_idx = loop_idx_pair.first;
-            const int curr_node_idx = loop_idx_pair.second;
-            auto relative_pose_optional = doICPVirtualRelative(prev_node_idx, curr_node_idx);
+           
+            cout<<"keyframePoses.size()="<<keyframePoses.size()<<endl;
+            if( keyframePoses.size() < 2330)
+                continue;
+            auto relative_pose_optional = doICPVirtualRelative(101, 2300);
             if(relative_pose_optional) {
                 gtsam::Pose3 relative_pose = relative_pose_optional.value();
                 mtxPosegraph.lock();
-                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(prev_node_idx, curr_node_idx, relative_pose, robustLoopNoise));
+                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(101, 2520, relative_pose, robustLoopNoise));
                 // runISAM2opt();
                 mtxPosegraph.unlock();
-            } 
+            }
+
+            // wait (must required for running the while loop)
+            std::chrono::milliseconds dura(100);
+            std::this_thread::sleep_for(dura); 
         }
 
         // wait (must required for running the while loop)
-        std::chrono::milliseconds dura(2);
-        std::this_thread::sleep_for(dura);
+        // std::chrono::milliseconds dura(2);
+        // std::this_thread::sleep_for(dura);
     }
 } // process_icp
 
@@ -855,6 +886,8 @@ void process_viz_map(void)
         if(recentIdxUpdated > 1) {
             pubMap();
         }
+
+        // pubMap();
     }
 } // pointcloud_viz
 
@@ -899,10 +932,7 @@ int main(int argc, char **argv)
 
 	ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_cloud_registered_local", 100, laserCloudFullResHandler);
 	ros::Subscriber subLaserOdometry = nh.subscribe<nav_msgs::Odometry>("/aft_mapped_to_init", 100, laserOdometryHandler);
-	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("/localization/gps/fix", 100, gpsHandler);
-    // ros::Subscriber subImu = nh.subscribe<sensor_msgs::NavSatFix>("/gps/fix", 100, gpsHandler);
-
-    ros::Subscriber sub_imu = nh.subscribe("/localization/imu/data", 200000, imu_cbk);
+	ros::Subscriber subGPS = nh.subscribe<sensor_msgs::NavSatFix>("/gps/fix", 100, gpsHandler);
 
 	pubOdomAftPGO = nh.advertise<nav_msgs::Odometry>("/aft_pgo_odom", 100);
 	pubOdomRepubVerifier = nh.advertise<nav_msgs::Odometry>("/repub_odom", 100);
@@ -912,7 +942,7 @@ int main(int argc, char **argv)
 	pubLoopScanLocal = nh.advertise<sensor_msgs::PointCloud2>("/loop_scan_local", 100);
 	pubLoopSubmapLocal = nh.advertise<sensor_msgs::PointCloud2>("/loop_submap_local", 100);
 
-    pubOdomGps = nh.advertise<nav_msgs::Odometry>("/GpsOdom", 5);
+    pubLoopScanLocal_aftSac = nh.advertise<sensor_msgs::PointCloud2>("/loop_scan_local_aftSac", 100);
 
 	std::thread posegraph_slam {process_pg}; // pose graph construction
 	std::thread lc_detection {process_lcd}; // loop closure detection 
