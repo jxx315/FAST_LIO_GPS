@@ -457,9 +457,20 @@ void loopFindNearKeyframesCloud_jxx( pcl::PointCloud<PointType>::Ptr& nearKeyfra
     if (nearKeyframes->empty())
         return;
 
+    pcl::PointCloud<PointType>::Ptr cloud_cut(new pcl::PointCloud<PointType>());
+    for(int i=0;i<nearKeyframes->size();i++)
+    {
+        if(nearKeyframes->points[i].x<25 && nearKeyframes->points[i].x>-25
+        && nearKeyframes->points[i].y<25 && nearKeyframes->points[i].y>-25)
+        {
+            cloud_cut->points.emplace_back(nearKeyframes->points[i]);
+        }
+    }
+
     // downsample near keyframes
     pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
-    downSizeFilterICP.setInputCloud(nearKeyframes);
+    //downSizeFilterICP.setInputCloud(nearKeyframes);
+    downSizeFilterICP.setInputCloud(cloud_cut);
     downSizeFilterICP.filter(*cloud_temp);
     *nearKeyframes = *cloud_temp;
 } // loopFindNearKeyframesCloud
@@ -493,7 +504,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     pcl::io::savePCDFileBinary("/home/jiangxx/workspace/" + curr_node_idx_str + ".pcd", *targetKeyframeCloud); // scan 
 
     Eigen::Matrix4f guess_trans;
-    {
+    
         // 初始化正态分布(NDT)对象
         pcl::NormalDistributionsTransform<PointType, PointType> ndt;
 
@@ -503,7 +514,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
         
         ndt.setStepSize (0.1);    //为more-thuente线搜索设置最大步长
 
-        ndt.setResolution (1.0);   //设置NDT网格网格结构的分辨率（voxelgridcovariance）
+        ndt.setResolution (2.0);   //设置NDT网格网格结构的分辨率（voxelgridcovariance）
         //以上参数在使用房间尺寸比例下运算比较好，但是如果需要处理例如一个咖啡杯子的扫描之类更小的物体，需要对参数进行很大程度的缩小
 
         //设置匹配迭代的最大次数，这个参数控制程序运行的最大迭代次数，一般来说这个限制值之前优化程序会在epsilon变换阀值下终止
@@ -517,9 +528,9 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
         // 设置使用机器人测距法得到的粗略初始变换矩阵结果
        
         Eigen::Matrix4f init_guess ;
-        init_guess << 1.0, 0.0, 1.0, 0.0,
-                      0.0, 1.0, 0.0, 0.0,
-                      0.0, 0.0, 1.0, 0.0,
+        init_guess << 1.0, 0.0, 0.0, 3.0,
+                      0.0, 1.0, 0.0, -3.0,
+                      0.0, 0.0, 1.0, -4.0,
                       0.0, 0.0, 0.0, 1.0;
 
         // 计算需要的刚体变换以便将输入的源点云匹配到目标点云
@@ -531,42 +542,38 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
 
         guess_trans = ndt.getFinalTransformation ();
 
-    }
+    
      
 
 
-    // ICP Settings
-    pcl::IterativeClosestPoint<PointType, PointType> icp;
+    // // ICP Settings
+    // pcl::IterativeClosestPoint<PointType, PointType> icp;
     // icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
     // icp.setMaximumIterations(100);
     // icp.setTransformationEpsilon(1e-6);
     // icp.setEuclideanFitnessEpsilon(1e-6);
     // icp.setRANSACIterations(0);
 
-    icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
-    icp.setMaximumIterations(100);
-    icp.setTransformationEpsilon(1e-6);
-    icp.setEuclideanFitnessEpsilon(1e-6);
-    icp.setRANSACIterations(0);
-
-    // Align pointclouds
-    icp.setInputSource(cureKeyframeCloud);
-    icp.setInputTarget(targetKeyframeCloud);
-    pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
-    icp.align(*unused_result, guess_trans);
+    // // Align pointclouds
+    // icp.setInputSource(cureKeyframeCloud);
+    // icp.setInputTarget(targetKeyframeCloud);
+    // pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
+    // icp.align(*unused_result, guess_trans);
  
     float loopFitnessScoreThreshold =3; // user parameter but fixed low value is safe. 
-    if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold) {
-        std::cout << "[SC loop] ICP fitness test failed (" << icp.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
+    //if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold) {
+    if (ndt.hasConverged() == false || ndt.getFitnessScore() > loopFitnessScoreThreshold) {
+        std::cout << "[SC loop] ndt fitness test failed (" << ndt.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
         return std::nullopt;
     } else {
-        std::cout << "[SC loop] ICP fitness test passed (" << icp.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
+        std::cout << "[SC loop] ndt fitness test passed (" << ndt.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
     }
 
     // Get pose transformation
     float x, y, z, roll, pitch, yaw;
     Eigen::Affine3f correctionLidarFrame;
-    correctionLidarFrame = icp.getFinalTransformation();
+    //correctionLidarFrame = icp.getFinalTransformation();
+    correctionLidarFrame = ndt.getFinalTransformation ();
     pcl::getTranslationAndEulerAngles (correctionLidarFrame, x, y, z, roll, pitch, yaw);
     gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
     gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
@@ -795,8 +802,7 @@ void process_icp(void)
 
 
 
-        while ( 1 )
-        {
+       
            
             cout<<"keyframePoses.size()="<<keyframePoses.size()<<endl;
             if( keyframePoses.size() < 2330)
@@ -805,15 +811,16 @@ void process_icp(void)
             if(relative_pose_optional) {
                 gtsam::Pose3 relative_pose = relative_pose_optional.value();
                 mtxPosegraph.lock();
-                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(101, 2520, relative_pose, robustLoopNoise));
+                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(101, 2300, relative_pose, robustLoopNoise));
                 // runISAM2opt();
                 mtxPosegraph.unlock();
+                break;
             }
 
             // wait (must required for running the while loop)
             std::chrono::milliseconds dura(100);
             std::this_thread::sleep_for(dura); 
-        }
+      
 
         // wait (must required for running the while loop)
         // std::chrono::milliseconds dura(2);
@@ -924,7 +931,8 @@ int main(int argc, char **argv)
 
     float filter_size = 0.4; 
     downSizeFilterScancontext.setLeafSize(filter_size, filter_size, filter_size);
-    downSizeFilterICP.setLeafSize(filter_size, filter_size, filter_size);
+    //downSizeFilterICP.setLeafSize(filter_size, filter_size, filter_size);
+    downSizeFilterICP.setLeafSize(0.1, 0.1, 0.1);
 
     double mapVizFilterSize;
 	nh.param<double>("mapviz_filter_size", mapVizFilterSize, 0.4); // pose assignment every k frames 
@@ -945,7 +953,7 @@ int main(int argc, char **argv)
     pubLoopScanLocal_aftSac = nh.advertise<sensor_msgs::PointCloud2>("/loop_scan_local_aftSac", 100);
 
 	std::thread posegraph_slam {process_pg}; // pose graph construction
-	std::thread lc_detection {process_lcd}; // loop closure detection 
+	//std::thread lc_detection {process_lcd}; // loop closure detection 
 	std::thread icp_calculation {process_icp}; // loop constraint calculation via icp 
 	std::thread isam_update {process_isam}; // if you want to call less isam2 run (for saving redundant computations and no real-time visulization is required), uncommment this and comment all the above runisam2opt when node is added. 
 
