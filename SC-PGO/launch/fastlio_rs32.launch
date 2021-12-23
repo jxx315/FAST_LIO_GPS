@@ -32,6 +32,7 @@
     <!-- utils -->
     <!-- <param name="save_directory" type="string" value="$(env HOME)/Desktop/catkin_fastlio_slam/data/"/>  CHANGE THIS and end with / -->
     <param name="save_directory" type="string" value="/home/jiangxx/jxx_ws1/lio_outputMaps/my_test/"/>  <!-- CHANGE THIS and end with / -->
+    
     <!-- nodes -->
     <node pkg="aloam_velodyne" type="alaserPGO" name="alaserPGO" output="screen" /> <!-- Scan Context-based PGO -->
 

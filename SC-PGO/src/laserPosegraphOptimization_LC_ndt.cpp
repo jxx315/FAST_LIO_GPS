@@ -61,6 +61,7 @@
 #include "aloam_velodyne/tic_toc.h"
 
 #include "scancontext/Scancontext.h"
+#include <aloam_velodyne/SaveMap.h>
 
 using namespace gtsam;
 
@@ -126,6 +127,7 @@ std::mutex mtxPosegraph;
 std::mutex mtxRecentPose;
 
 pcl::PointCloud<PointType>::Ptr laserCloudMapPGO(new pcl::PointCloud<PointType>());
+pcl::PointCloud<PointType>::Ptr laserCloudMapPGO_SavePcd(new pcl::PointCloud<PointType>());
 pcl::VoxelGrid<PointType> downSizeFilterMapPGO;
 bool laserCloudMapPGORedraw = true;
 
@@ -303,6 +305,31 @@ pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::P
     return cloudOut;
 }
 
+
+pcl::PointCloud<PointType>::Ptr global2local(const pcl::PointCloud<PointType>::Ptr &cloudIn, const Pose6D& tf)
+{
+    pcl::PointCloud<PointType>::Ptr cloudOut(new pcl::PointCloud<PointType>());
+
+    int cloudSize = cloudIn->size();
+    cloudOut->resize(cloudSize);
+
+    Eigen::Affine3f transTemp = pcl::getTransformation(tf.x, tf.y, tf.z, tf.roll, tf.pitch, tf.yaw);
+    Eigen::Affine3f transCur = transTemp.inverse();
+    
+    int numberOfCores = 16;
+    #pragma omp parallel for num_threads(numberOfCores)
+    for (int i = 0; i < cloudSize; ++i)
+    {
+        const auto &pointFrom = cloudIn->points[i];
+        cloudOut->points[i].x = transCur(0,0) * pointFrom.x + transCur(0,1) * pointFrom.y + transCur(0,2) * pointFrom.z + transCur(0,3);
+        cloudOut->points[i].y = transCur(1,0) * pointFrom.x + transCur(1,1) * pointFrom.y + transCur(1,2) * pointFrom.z + transCur(1,3);
+        cloudOut->points[i].z = transCur(2,0) * pointFrom.x + transCur(2,1) * pointFrom.y + transCur(2,2) * pointFrom.z + transCur(2,3);
+        cloudOut->points[i].intensity = pointFrom.intensity;
+    }
+
+    return cloudOut;
+}
+
 void pubPath( void )
 {
     // pub odom and path 
@@ -457,6 +484,11 @@ void loopFindNearKeyframesCloud_jxx( pcl::PointCloud<PointType>::Ptr& nearKeyfra
     if (nearKeyframes->empty())
         return;
 
+    //再转换到key node下
+    //*nearKeyframes = *global2local(nearKeyframes,keyframePosesUpdated[root_idx]);
+
+
+    
     pcl::PointCloud<PointType>::Ptr cloud_cut(new pcl::PointCloud<PointType>());
     for(int i=0;i<nearKeyframes->size();i++)
     {
@@ -475,28 +507,26 @@ void loopFindNearKeyframesCloud_jxx( pcl::PointCloud<PointType>::Ptr& nearKeyfra
     *nearKeyframes = *cloud_temp;
 } // loopFindNearKeyframesCloud
 
-
+Eigen::Affine3f pclPointToAffine3f(Pose6D tf)
+{ 
+    return pcl::getTransformation(tf.x, tf.y, tf.z, tf.roll, tf.pitch, tf.yaw);
+}
 std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf_idx )
 {
     // parse pointclouds
     int historyKeyframeSearchNum = 100; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
     pcl::PointCloud<PointType>::Ptr targetKeyframeCloud(new pcl::PointCloud<PointType>());
-    // loopFindNearKeyframesCloud_jxx(cureKeyframeCloud, _curr_kf_idx,5, _loop_kf_idx); // use same root of loop kf idx 
+
     loopFindNearKeyframesCloud_jxx(cureKeyframeCloud, _curr_kf_idx,50, _curr_kf_idx);
     loopFindNearKeyframesCloud_jxx(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum, _loop_kf_idx); 
 
-    // loop verification 
-    sensor_msgs::PointCloud2 cureKeyframeCloudMsg;
-    pcl::toROSMsg(*cureKeyframeCloud, cureKeyframeCloudMsg);
-    cureKeyframeCloudMsg.header.frame_id = "camera_init";
-    pubLoopScanLocal.publish(cureKeyframeCloudMsg);
 
-    sensor_msgs::PointCloud2 targetKeyframeCloudMsg;
-    pcl::toROSMsg(*targetKeyframeCloud, targetKeyframeCloudMsg);
-    targetKeyframeCloudMsg.header.frame_id = "camera_init";
-    pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
 
+    //loopFindNearKeyframesCloud(cureKeyframeCloud, _curr_kf_idx, 50, _loop_kf_idx); // use same root of loop kf idx 
+    //loopFindNearKeyframesCloud(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum, _loop_kf_idx); 
+
+ 
 
     std::string curr_node_idx_str = padZeros(_curr_kf_idx);
     pcl::io::savePCDFileBinary("/home/jiangxx/workspace/" + curr_node_idx_str + ".pcd", *cureKeyframeCloud); // scan 
@@ -505,47 +535,53 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
 
     Eigen::Matrix4f guess_trans;
     
-        // 初始化正态分布(NDT)对象
-        pcl::NormalDistributionsTransform<PointType, PointType> ndt;
+    // 初始化正态分布(NDT)对象
+    pcl::NormalDistributionsTransform<PointType, PointType> ndt;
 
-        // 根据输入数据的尺度设置NDT相关参数
+    // 根据输入数据的尺度设置NDT相关参数
 
-        ndt.setTransformationEpsilon (0.01);   //为终止条件设置最小转换差异
+    ndt.setTransformationEpsilon (0.01);   //为终止条件设置最小转换差异
         
-        ndt.setStepSize (0.1);    //为more-thuente线搜索设置最大步长
+    ndt.setStepSize (0.5);    //为more-thuente线搜索设置最大步长
 
-        ndt.setResolution (2.0);   //设置NDT网格网格结构的分辨率（voxelgridcovariance）
-        //以上参数在使用房间尺寸比例下运算比较好，但是如果需要处理例如一个咖啡杯子的扫描之类更小的物体，需要对参数进行很大程度的缩小
+    ndt.setResolution (4.0);   //设置NDT网格网格结构的分辨率（voxelgridcovariance）
+    //以上参数在使用房间尺寸比例下运算比较好，但是如果需要处理例如一个咖啡杯子的扫描之类更小的物体，需要对参数进行很大程度的缩小
 
-        //设置匹配迭代的最大次数，这个参数控制程序运行的最大迭代次数，一般来说这个限制值之前优化程序会在epsilon变换阀值下终止
-        //添加最大迭代次数限制能够增加程序的鲁棒性阻止了它在错误的方向上运行时间过长
-        ndt.setMaximumIterations (35);
+    //设置匹配迭代的最大次数，这个参数控制程序运行的最大迭代次数，一般来说这个限制值之前优化程序会在epsilon变换阀值下终止
+    //添加最大迭代次数限制能够增加程序的鲁棒性阻止了它在错误的方向上运行时间过长
+    ndt.setMaximumIterations (100);
 
-        ndt.setInputSource (cureKeyframeCloud);  //源点云
-        // Setting point cloud to be aligned to.
-        ndt.setInputTarget (targetKeyframeCloud);  //目标点云
+    pcl::PointCloud<PointType>::Ptr filtered_cloud (new pcl::PointCloud<PointType>);
+    pcl::ApproximateVoxelGrid<PointType> approximate_voxel_filter;
+    approximate_voxel_filter.setLeafSize (0.11, 0.11, 0.11);
+    approximate_voxel_filter.setInputCloud (cureKeyframeCloud);
+    approximate_voxel_filter.filter (*filtered_cloud);
 
-        // 设置使用机器人测距法得到的粗略初始变换矩阵结果
+    ndt.setInputSource (filtered_cloud);  //源点云
+    // Setting point cloud to be aligned to.
+    ndt.setInputTarget (targetKeyframeCloud);  //目标点云
+
+    // 设置使用机器人测距法得到的粗略初始变换矩阵结果
        
-        Eigen::Matrix4f init_guess ;
-        init_guess << 1.0, 0.0, 0.0, 3.0,
+    Eigen::Matrix4f init_guess ;
+    //  init_guess << 1.0, 0.0, 0.0, 0.0,
+    //                     0.0, 1.0, 0.0, 0.0,
+    //                     0.0, 0.0, 1.0, 0.0,
+    //                     0.0, 0.0, 0.0, 1.0;
+
+     init_guess << 1.0, 0.0, 0.0, 3.0,
                       0.0, 1.0, 0.0, -3.0,
-                      0.0, 0.0, 1.0, -4.0,
+                      0.0, 0.0, 1.0, -3.5,
                       0.0, 0.0, 0.0, 1.0;
 
-        // 计算需要的刚体变换以便将输入的源点云匹配到目标点云
-        pcl::PointCloud<PointType>::Ptr output_cloud (new pcl::PointCloud<PointType>);
-        ndt.align (*output_cloud, init_guess);
-        //这个地方的output_cloud不能作为最终的源点云变换，因为上面对点云进行了滤波处理
-        std::cout << "Normal Distributions Transform has converged:" << ndt.hasConverged ()
+    // 计算需要的刚体变换以便将输入的源点云匹配到目标点云
+    pcl::PointCloud<PointType>::Ptr output_cloud (new pcl::PointCloud<PointType>);
+    ndt.align (*output_cloud, init_guess);
+    //这个地方的output_cloud不能作为最终的源点云变换，因为上面对点云进行了滤波处理
+    std::cout << "Normal Distributions Transform has converged:" << ndt.hasConverged ()
                     << " score: " << ndt.getFitnessScore () << std::endl;
 
-        guess_trans = ndt.getFinalTransformation ();
-
-    
-     
-
-
+    guess_trans = ndt.getFinalTransformation();
     // // ICP Settings
     // pcl::IterativeClosestPoint<PointType, PointType> icp;
     // icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter 
@@ -560,7 +596,7 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     // pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
     // icp.align(*unused_result, guess_trans);
  
-    float loopFitnessScoreThreshold =3; // user parameter but fixed low value is safe. 
+    float loopFitnessScoreThreshold =100; // user parameter but fixed low value is safe. 
     //if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold) {
     if (ndt.hasConverged() == false || ndt.getFitnessScore() > loopFitnessScoreThreshold) {
         std::cout << "[SC loop] ndt fitness test failed (" << ndt.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
@@ -568,17 +604,47 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     } else {
         std::cout << "[SC loop] ndt fitness test passed (" << ndt.getFitnessScore() << " < " << loopFitnessScoreThreshold << "). Add this SC loop." << std::endl;
     }
+    
+    // loop verification 
+    pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
+    pcl::transformPointCloud(*cureKeyframeCloud, *closed_cloud, ndt.getFinalTransformation());
+
+    sensor_msgs::PointCloud2 cureKeyframeCloudMsg;
+    pcl::toROSMsg(*closed_cloud, cureKeyframeCloudMsg);
+    cureKeyframeCloudMsg.header.frame_id = "camera_init";
+    pubLoopScanLocal.publish(cureKeyframeCloudMsg);
+
+    sensor_msgs::PointCloud2 targetKeyframeCloudMsg;
+    pcl::toROSMsg(*targetKeyframeCloud, targetKeyframeCloudMsg);
+    targetKeyframeCloudMsg.header.frame_id = "camera_init";
+    pubLoopSubmapLocal.publish(targetKeyframeCloudMsg);
+
+
 
     // Get pose transformation
     float x, y, z, roll, pitch, yaw;
     Eigen::Affine3f correctionLidarFrame;
     //correctionLidarFrame = icp.getFinalTransformation();
     correctionLidarFrame = ndt.getFinalTransformation ();
-    pcl::getTranslationAndEulerAngles (correctionLidarFrame, x, y, z, roll, pitch, yaw);
-    gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
-    gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
 
+
+    Eigen::Affine3f tWrong = pclPointToAffine3f(keyframePosesUpdated[_curr_kf_idx]);
+    Eigen::Affine3f tCorrect = correctionLidarFrame * tWrong;
+    pcl::getTranslationAndEulerAngles (tCorrect, x, y, z, roll, pitch, yaw);
+
+    std::cout << ndt.getFinalTransformation ()<<endl;
+    //pcl::getTranslationAndEulerAngles (correctionLidarFrame, x, y, z, roll, pitch, yaw);
+    gtsam::Pose3 poseFrom = Pose3(Rot3::RzRyRx(roll, pitch, yaw), Point3(x, y, z));
+    //gtsam::Pose3 poseTo = Pose3(Rot3::RzRyRx(0.0, 0.0, 0.0), Point3(0.0, 0.0, 0.0));
+
+    auto tf2 =keyframePosesUpdated[_loop_kf_idx];
+    gtsam::Pose3 poseTo = gtsam::Pose3(gtsam::Rot3::RzRyRx(double(tf2.roll), double(tf2.pitch), double(tf2.yaw)),
+                                  gtsam::Point3(double(tf2.x),    double(tf2.y),     double(tf2.z)));
+
+
+    std::cout <<"return poseFrom.between(poseTo)"<<std::endl;
     return poseFrom.between(poseTo);
+    
 } // doICPVirtualRelative
 
 void process_pg()
@@ -724,9 +790,9 @@ void process_pg()
             // if want to print the current graph, use gtSAMgraph.print("\nFactor Graph:\n");
 
             // save utility 
-            std::string curr_node_idx_str = padZeros(curr_node_idx);
-            pcl::io::savePCDFileBinary(pgScansDirectory + curr_node_idx_str + ".pcd", *thisKeyFrame); // scan 
-            pgTimeSaveStream << timeLaser << std::endl; // path 
+            // std::string curr_node_idx_str = padZeros(curr_node_idx);
+            // pcl::io::savePCDFileBinary(pgScansDirectory + curr_node_idx_str + ".pcd", *thisKeyFrame); // scan 
+            // pgTimeSaveStream << timeLaser << std::endl; // path 
         }
 
         // ps. 
@@ -805,14 +871,25 @@ void process_icp(void)
        
            
             cout<<"keyframePoses.size()="<<keyframePoses.size()<<endl;
-            if( keyframePoses.size() < 2330)
+            if( keyframePoses.size() < 2320)
                 continue;
             auto relative_pose_optional = doICPVirtualRelative(101, 2300);
             if(relative_pose_optional) {
                 gtsam::Pose3 relative_pose = relative_pose_optional.value();
                 mtxPosegraph.lock();
-                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(101, 2300, relative_pose, robustLoopNoise));
-                // runISAM2opt();
+
+                
+                // float noiseScore = 1.5f;
+                // gtsam::Vector Vector6;
+                // Vector6<< noiseScore, noiseScore, noiseScore, noiseScore, noiseScore, noiseScore;
+                // noiseModel::Diagonal::shared_ptr constraintNoise = noiseModel::Diagonal::Variances(Vector6);
+
+                std::cout <<" before gtSAMgraph.add "<<std::endl;
+                gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(2300, 101, relative_pose, odomNoise));  //odomNoise  robustLoopNoise
+                //gtSAMgraph.add(gtsam::BetweenFactor<gtsam::Pose3>(0, 2300, relative_pose, odomNoise));  //odomNoise
+
+                cout<<"%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%"<<endl;
+                //runISAM2opt();
                 mtxPosegraph.unlock();
                 break;
             }
@@ -857,6 +934,47 @@ void process_isam(void)
         }
     }
 }
+
+bool save_map_service(aloam_velodyne::SaveMapRequest &req, aloam_velodyne::SaveMapResponse &res)
+{
+        std::cout << "req.destination" << req.destination << std::endl;
+        std::cout << "req.resolution" << req.resolution << std::endl;
+        std::cout << "req.utm" << req.utm << std::endl;
+
+        cout << "****************************************************" << endl;
+        cout << "start saving map to pcd files ..." << endl;
+
+        /**************** save map ****************/
+   
+        laserCloudMapPGO_SavePcd->clear();
+
+        mKF.lock(); 
+        // for (int node_idx=0; node_idx < int(keyframePosesUpdated.size()); node_idx++) {
+       
+        for (int node_idx=0; node_idx < recentIdxUpdated; node_idx++) {
+            *laserCloudMapPGO_SavePcd += *local2global(keyframeLaserClouds[node_idx], keyframePosesUpdated[node_idx]);
+        }
+        mKF.unlock(); 
+     
+        if (1)
+        {
+            cout << "=========================>saveing map ..." << endl;
+            //string file_name = string("scans.pcd");
+            //string all_points_dir(string(string(ROOT_DIR) + "PCD/") + file_name);
+            pcl::PCDWriter pcd_writer;
+            //cout << "current scan saved to /PCD/" << file_name<<endl;
+            //pcd_writer.writeBinary(all_points_dir, *pcl_wait_save);
+            pcd_writer.writeBinary(pgScansDirectory + "Opt_map" + ".pcd", *laserCloudMapPGO_SavePcd);
+
+            //pcl::io::savePCDFileBinary(pgScansDirectory + "map" + ".pcd", *thisKeyFrame); // scan 
+        }
+        cout << "****************************************************" << endl;
+        cout << "saving map completed" << endl;
+
+        res.success = 1;
+        return true;
+}
+
 
 void pubMap(void)
 {
@@ -905,13 +1023,14 @@ int main(int argc, char **argv)
 	ros::NodeHandle nh;
 
 	nh.param<std::string>("save_directory", save_directory, "/"); // pose assignment every k m move 
-    pgKITTIformat = save_directory + "optimized_poses.txt";
-    odomKITTIformat = save_directory + "odom_poses.txt";
-    pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out); 
-    pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
-    pgScansDirectory = save_directory + "Scans/";
-    auto unused = system((std::string("exec rm -r ") + pgScansDirectory).c_str());
-    unused = system((std::string("mkdir -p ") + pgScansDirectory).c_str());
+    // pgKITTIformat = save_directory + "optimized_poses.txt";
+    // odomKITTIformat = save_directory + "odom_poses.txt";
+    // pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out); 
+    // pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
+    // pgScansDirectory = save_directory + "Scans/";
+    // auto unused = system((std::string("exec rm -r ") + pgScansDirectory).c_str());
+    // unused = system((std::string("mkdir -p ") + pgScansDirectory).c_str());
+    pgScansDirectory = save_directory;
 
 	nh.param<double>("keyframe_meter_gap", keyframeMeterGap, 2.0); // pose assignment every k m move 
 	nh.param<double>("keyframe_deg_gap", keyframeDegGap, 10.0); // pose assignment every k deg rot 
@@ -919,6 +1038,12 @@ int main(int argc, char **argv)
 
 	nh.param<double>("sc_dist_thres", scDistThres, 0.2);  
 	nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
+
+
+    ros::ServiceServer save_map_service_server;
+
+    save_map_service_server = nh.advertiseService("opt/save_map", &save_map_service);
+
 
     ISAM2Params parameters;
     parameters.relinearizeThreshold = 0.01;
