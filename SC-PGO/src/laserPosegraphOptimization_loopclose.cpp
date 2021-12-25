@@ -713,6 +713,7 @@ void performSCLoopClosure_jxx(void)
 
     cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
     //每次都copy一遍，好麻烦
+    mKF.lock(); 
     for(int i=0;i<keyframePosesUpdated.size();i++)
     {
         PointType thisPose3D;
@@ -722,7 +723,7 @@ void performSCLoopClosure_jxx(void)
         thisPose3D.intensity = i; // this can be used as index
         cloudKeyPoses3D->push_back(thisPose3D);
     }
-   
+    mKF.unlock(); 
 
     // find keys
     int loopKeyCur;
