@@ -79,8 +79,8 @@ target_link_libraries(alaserPGO_gps
 
 
 add_executable(alaserPGO
-  src/laserPosegraphOptimization_LC_ndt.cpp
-  # src/laserPosegraphOptimization.cpp
+  # src/laserPosegraphOptimization_LC_ndt.cpp
+  src/laserPosegraphOptimization_loopclose.cpp
   include/scancontext/Scancontext.cpp
 )
 target_compile_options(alaserPGO 
