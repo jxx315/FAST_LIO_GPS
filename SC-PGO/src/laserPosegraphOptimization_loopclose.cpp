@@ -71,6 +71,16 @@ using namespace gtsam;
 using std::cout;
 using std::endl;
 
+
+
+double ndt_resolution =0;
+double ndt_stepSize=0;
+double loopFitnessScoreThreshold = 0;
+double loopCutRange=0;
+int historyKeyframeSearchNum_curr=0;
+int historyKeyframeSearchNum_map=0;
+
+
 double keyframeMeterGap;
 double keyframeDegGap, keyframeRadGap;
 double translationAccumulated = 1000000.0; // large value means must add the first given frame.
@@ -454,12 +464,12 @@ void loopFindNearKeyframesCloud_jxx( pcl::PointCloud<PointType>::Ptr& nearKeyfra
     //再转换到key node下
     //*nearKeyframes = *global2local(nearKeyframes,keyframePosesUpdated[root_idx]);
 
+   
+    float Xupper = keyframePosesUpdated[key].x+loopCutRange;
+    float Xlower = keyframePosesUpdated[key].x-loopCutRange;
 
-    float Xupper = keyframePosesUpdated[key].x+40;
-    float Xlower = keyframePosesUpdated[key].x-40;
-
-    float Yupper = keyframePosesUpdated[key].y+40;
-    float Ylower = keyframePosesUpdated[key].y-40;
+    float Yupper = keyframePosesUpdated[key].y+loopCutRange;
+    float Ylower = keyframePosesUpdated[key].y-loopCutRange;
 
     pcl::PointCloud<PointType>::Ptr cloud_cut(new pcl::PointCloud<PointType>());
     for(int i=0;i<nearKeyframes->size();i++)
@@ -490,12 +500,12 @@ Eigen::Affine3f pclPointToAffine3f(Pose6D tf)
 std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf_idx )
 {
     // parse pointclouds
-    int historyKeyframeSearchNum = 100; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
+    //int historyKeyframeSearchNum = 100; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
     pcl::PointCloud<PointType>::Ptr targetKeyframeCloud(new pcl::PointCloud<PointType>());
 
-    loopFindNearKeyframesCloud_jxx(cureKeyframeCloud, _curr_kf_idx,50, _curr_kf_idx);
-    loopFindNearKeyframesCloud_jxx(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum, _loop_kf_idx); 
+    loopFindNearKeyframesCloud_jxx(cureKeyframeCloud, _curr_kf_idx,historyKeyframeSearchNum_curr, _curr_kf_idx);
+    loopFindNearKeyframesCloud_jxx(targetKeyframeCloud, _loop_kf_idx, historyKeyframeSearchNum_map, _loop_kf_idx); 
 
     // std::string curr_node_idx_str = padZeros(_curr_kf_idx);
     // pcl::io::savePCDFileBinary("/home/jiangxx/workspace/" + curr_node_idx_str + ".pcd", *cureKeyframeCloud); // scan 
@@ -515,9 +525,9 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
 
     ndt.setTransformationEpsilon (0.01);   //为终止条件设置最小转换差异
         
-    ndt.setStepSize (0.5);    //为more-thuente线搜索设置最大步长
+    ndt.setStepSize (ndt_stepSize);    // 0.5--->mid70 ok为more-thuente线搜索设置最大步长
 
-    ndt.setResolution (4.0);   //设置NDT网格网格结构的分辨率（voxelgridcovariance）
+    ndt.setResolution (ndt_resolution);   // 4.0 --->mid70 ok   设置NDT网格网格结构的分辨率（voxelgridcovariance）
     //以上参数在使用房间尺寸比例下运算比较好，但是如果需要处理例如一个咖啡杯子的扫描之类更小的物体，需要对参数进行很大程度的缩小
 
     //设置匹配迭代的最大次数，这个参数控制程序运行的最大迭代次数，一般来说这个限制值之前优化程序会在epsilon变换阀值下终止
@@ -570,9 +580,9 @@ std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf
     pcl::PointCloud<PointType>::Ptr unused_result(new pcl::PointCloud<PointType>());
     icp.align(*unused_result, guess_trans);
  
-    float loopFitnessScoreThreshold = 2; // user parameter but fixed low value is safe. 
-    //if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold) {
-    if (ndt.hasConverged() == false || ndt.getFitnessScore() > loopFitnessScoreThreshold) {
+    //float loopFitnessScoreThreshold = 0.5; // user parameter but fixed low value is safe. 
+    if (icp.hasConverged() == false || icp.getFitnessScore() > loopFitnessScoreThreshold) {
+    //if (ndt.hasConverged() == false || ndt.getFitnessScore() > loopFitnessScoreThreshold) {
         std::cout << "[SC loop] ndt fitness test failed (" << ndt.getFitnessScore() << " > " << loopFitnessScoreThreshold << "). Reject this SC loop." << std::endl;
         return std::nullopt;
     } else {
@@ -1080,14 +1090,6 @@ int main(int argc, char **argv)
 	ros::NodeHandle nh;
 
 	nh.param<std::string>("save_directory", save_directory, "/"); // pose assignment every k m move 
-    // pgKITTIformat = save_directory + "optimized_poses.txt";
-    // odomKITTIformat = save_directory + "odom_poses.txt";
-    // pgTimeSaveStream = std::fstream(save_directory + "times.txt", std::fstream::out); 
-    // pgTimeSaveStream.precision(std::numeric_limits<double>::max_digits10);
-    // pgScansDirectory = save_directory + "Scans/";
-    // auto unused = system((std::string("exec rm -r ") + pgScansDirectory).c_str());
-    // unused = system((std::string("mkdir -p ") + pgScansDirectory).c_str());
-
     pgScansDirectory = save_directory;
 
 	nh.param<double>("keyframe_meter_gap", keyframeMeterGap, 2.0); // pose assignment every k m move 
@@ -1096,6 +1098,17 @@ int main(int argc, char **argv)
 
 	nh.param<double>("sc_dist_thres", scDistThres, 0.2);  
 	nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
+
+    nh.param<double>("ndt_resolution", ndt_resolution, 0.2);
+    nh.param<double>("ndt_stepSize", ndt_stepSize, 0.2);
+    nh.param<double>("loopFitnessScoreThreshold", loopFitnessScoreThreshold, 0.2);
+    nh.param<double>("loopCutRange", loopCutRange, 50);
+    
+
+    nh.param<int>("historyKeyframeSearchNum_curr", historyKeyframeSearchNum_curr, 50);
+    nh.param<int>("historyKeyframeSearchNum_map", historyKeyframeSearchNum_map, 100);
+
+
 
     ros::ServiceServer save_map_service_server;
     save_map_service_server = nh.advertiseService("opt/save_map", &save_map_service);
@@ -1109,7 +1122,7 @@ int main(int argc, char **argv)
     scManager.setSCdistThres(scDistThres);
     scManager.setMaximumRadius(scMaximumRadius);
 
-    float filter_size = 0.2; 
+    float filter_size = 0.1; 
     downSizeFilterScancontext.setLeafSize(filter_size, filter_size, filter_size);
     // downSizeFilterICP.setLeafSize(filter_size, filter_size, filter_size);
     downSizeFilterICP.setLeafSize(0.1, 0.1, 0.1);
