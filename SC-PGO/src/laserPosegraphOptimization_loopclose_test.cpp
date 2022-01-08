@@ -23,7 +23,7 @@
 #include <pcl/octree/octree_pointcloud_voxelcentroid.h>
 #include <pcl/filters/crop_box.h> 
 #include <pcl_conversions/pcl_conversions.h>
-#include <pcl/registration/ndt.h>                 //NDT(正态分布)配准类头文件
+#include <pcl/registration/ndt.h>      //NDT(正态分布)配准类头文件
 #include <pcl/filters/approximate_voxel_grid.h>   //滤波类头文件  （使用体素网格过滤器处理的效果比较好）
 
 #include <ros/ros.h>
@@ -145,7 +145,7 @@ noiseModel::Base::shared_ptr robustLoopNoise;
 noiseModel::Base::shared_ptr robustGPSNoise;
 
 pcl::VoxelGrid<PointType> downSizeFilterScancontext;
-
+SCManager scManager;
 double scDistThres, scMaximumRadius;
 
 pcl::VoxelGrid<PointType> downSizeFilterICP;
@@ -295,6 +295,27 @@ Pose6D getOdom(nav_msgs::Odometry::ConstPtr _odom)
     return Pose6D{tx, ty, tz, roll, pitch, yaw}; 
 } // getOdom
 
+double pose2yaw(const Pose6D& _p1)
+{
+    Eigen::Affine3f SE3_p1 = pcl::getTransformation(_p1.x, _p1.y, _p1.z, _p1.roll, _p1.pitch, _p1.yaw);
+  
+    
+    float p1_dx, p1_dy, p1_dz, p1_droll, p1_dpitch, p1_dyaw;
+
+    pcl::getTranslationAndEulerAngles (SE3_p1, p1_dx, p1_dy, p1_dz, p1_droll, p1_dpitch, p1_dyaw);
+
+    #define rad2deg (180/3.1415)
+    
+    // yaw (0--->180(-180)--->0)
+    double yaw_deg = p1_dyaw *rad2deg;
+    std::cout << "p1 : " << yaw_deg<< std::endl;
+    
+    if(yaw_deg<0)
+        yaw_deg = 360 + yaw_deg;
+    // yaw (0--->360)
+    
+
+}
 
 Pose6D diffTransformation(const Pose6D& _p1, const Pose6D& _p2)
 {
@@ -304,23 +325,11 @@ Pose6D diffTransformation(const Pose6D& _p1, const Pose6D& _p2)
     Eigen::Affine3f SE3_delta; SE3_delta.matrix() = SE3_delta0;
     float dx, dy, dz, droll, dpitch, dyaw;
     pcl::getTranslationAndEulerAngles (SE3_delta, dx, dy, dz, droll, dpitch, dyaw);
-
-    // debug
-    float p1_dx, p1_dy, p1_dz, p1_droll, p1_dpitch, p1_dyaw;
-    float p2_dx, p2_dy, p2_dz, p2_droll, p2_dpitch, p2_dyaw;
-    pcl::getTranslationAndEulerAngles (SE3_p1, p1_dx, p1_dy, p1_dz, p1_droll, p1_dpitch, p1_dyaw);
-    pcl::getTranslationAndEulerAngles (SE3_p2, p2_dx, p2_dy, p2_dz, p2_droll, p2_dpitch, p2_dyaw);
-    #define rad2deg (180/3.1415)
-    // yaw (0--->180(-180)--->0)
-    std::cout << "p1 : " << p1_dx << ", " << p1_dy << ", " << p1_dz << ", " << p1_droll*rad2deg << ", " << p1_dpitch*rad2deg << ", " << p1_dyaw *rad2deg<< std::endl;
-    std::cout << "p2 : " << p2_dx << ", " << p2_dy << ", " << p2_dz << ", " << p2_droll *rad2deg<< ", " << p2_dpitch*rad2deg << ", " << p2_dyaw *rad2deg<< std::endl;
-    
-    std::cout << "delta : " << dx << ", " << dy << ", " << dz << ", " << droll << ", " << dpitch << ", " << dyaw << std::endl;
-
-    //
+    // std::cout << "delta : " << dx << ", " << dy << ", " << dz << ", " << droll << ", " << dpitch << ", " << dyaw << std::endl;
 
     return Pose6D{double(abs(dx)), double(abs(dy)), double(abs(dz)), double(abs(droll)), double(abs(dpitch)), double(abs(dyaw))};
 } // SE3Diff
+
 
 pcl::PointCloud<PointType>::Ptr local2global(const pcl::PointCloud<PointType>::Ptr &cloudIn, const Pose6D& tf)
 {
@@ -475,6 +484,9 @@ void loopFindNearKeyframesCloud_jxx( pcl::PointCloud<PointType>::Ptr& nearKeyfra
     if (nearKeyframes->empty())
         return;
 
+    //再转换到key node下
+    //*nearKeyframes = *global2local(nearKeyframes,keyframePosesUpdated[root_idx]);
+
    
     float Xupper = keyframePosesUpdated[key].x+loopCutRange;
     float Xlower = keyframePosesUpdated[key].x-loopCutRange;
@@ -508,30 +520,8 @@ Eigen::Affine3f pclPointToAffine3f(Pose6D tf)
 }
 
 
-/**
- **/
-bool detectCircularMotion(int key, int loop_key)
-{
-    for (int i = -submap_size; i <= submap_size; ++i) {
-        int keyNear = key + i;
-        if (keyNear < 0 || keyNear >= int(keyframeLaserClouds.size()) )
-            continue;
-
-        mKF.lock(); 
-        *nearKeyframes += * local2global(keyframeLaserClouds[keyNear], keyframePosesUpdated[root_idx+i]);
-        mKF.unlock(); 
-    }
-}
-
-
 std::optional<gtsam::Pose3> doICPVirtualRelative( int _loop_kf_idx, int _curr_kf_idx )
-{   
-    //detect if curr keyframe  and loop keyframe is Circular motion
-    {
-
-    }
-
-
+{
     // parse pointclouds
     //int historyKeyframeSearchNum = 100; // enough. ex. [-25, 25] covers submap length of 50x1 = 50m if every kf gap is 1m
     pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
@@ -740,6 +730,7 @@ void process_pg()
                     gpsOffsetInitialized = true;
                 } 
             }
+
             //
             // Save data and Add consecutive node 
             //
@@ -753,6 +744,7 @@ void process_pg()
             keyframePosesUpdated.push_back(pose_curr); // init
             keyframeTimes.push_back(timeLaserOdometry);
 
+            scManager.makeAndSaveScancontextAndKeys(*thisKeyFrameDS);
 
             laserCloudMapPGORedraw = true;
             mKF.unlock(); 
@@ -802,10 +794,8 @@ void process_pg()
                 if(curr_node_idx % 100 == 0)
                     cout << "posegraph odom node " << curr_node_idx << " added." << endl;
             }
-            // if want to print the current graph, use gtSAMgraph.print("\nFactor Graph:\n");
-
+          
         }
-
         // wait (must required for running the while loop)
         std::chrono::milliseconds dura(2);
         std::this_thread::sleep_for(dura);
@@ -1019,6 +1009,8 @@ void process_isam(void)
             //cout << "running isam2 optimization ..." << endl;
             mtxPosegraph.unlock();
 
+            // saveOptimizedVerticesKITTIformat(isamCurrentEstimate, pgKITTIformat); // pose
+            // saveOdometryVerticesKITTIformat(odomKITTIformat); // pose
         }
     }
 }
@@ -1117,6 +1109,9 @@ int main(int argc, char **argv)
 	nh.param<double>("keyframe_deg_gap", keyframeDegGap, 10.0); // pose assignment every k deg rot 
     keyframeRadGap = deg2rad(keyframeDegGap);
 
+	nh.param<double>("sc_dist_thres", scDistThres, 0.2);  
+	nh.param<double>("sc_max_radius", scMaximumRadius, 80.0); // 80 is recommended for outdoor, and lower (ex, 20, 40) values are recommended for indoor 
+
     nh.param<double>("ndt_resolution", ndt_resolution, 0.2);
     nh.param<double>("ndt_stepSize", ndt_stepSize, 0.2);
     nh.param<double>("loopFitnessScoreThreshold", loopFitnessScoreThreshold, 0.2);
@@ -1136,6 +1131,9 @@ int main(int argc, char **argv)
     parameters.relinearizeSkip = 1;
     isam = new ISAM2(parameters);
     initNoises();
+
+    scManager.setSCdistThres(scDistThres);
+    scManager.setMaximumRadius(scMaximumRadius);
 
     float filter_size = 0.1; 
     downSizeFilterScancontext.setLeafSize(filter_size, filter_size, filter_size);
